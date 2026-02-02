@@ -146,7 +146,14 @@ class _CheckInScreenState extends State<CheckInScreen> {
           age: profile.age?.toString(), 
           sex: profile.sex, 
           barangay: profile.barangay,
-          proofImage: proofUrl 
+          household: profile.household,
+          proofImage: proofUrl,
+          
+          // 🆕 VULNERABLE SECTOR FIELDS
+          vulSector: profile.vulSector,
+          disability: profile.disability,
+          ethnicity: profile.ethnicity,
+          is4P: profile.is4P,
         );
         
         if (mounted) _showSuccessDialog(profile.fullName);
