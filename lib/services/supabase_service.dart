@@ -67,7 +67,7 @@ class SupabaseService {
   }
 
   // ----------------------------------------------------------------
-  // 3. TRACK CHECK-IN (Saves Photo URL + Family Tracking)
+  // 3. TRACK CHECK-IN (Saves Photo + 8 Specific Categories)
   // ----------------------------------------------------------------
   Future<void> trackEvacueeCheckIn({
     required String profileId,
@@ -77,14 +77,18 @@ class SupabaseService {
     String? age,
     String? sex,
     String? barangay,
-    String? proofImage, // 📸 Accepts the photo URL
-    String? household,  // 🆕 NEW: Family/Household ID
+    String? proofImage, 
+    String? household,  
     
-    // 🆕 VULNERABLE SECTOR FIELDS
-    String? vulSector,    // Pregnant, Lactating, Solo Parent
-    String? disability,   // Person with Disability
-    String? ethnicity,    // Indigenous People
-    bool? is4P,          // 4P's Beneficiary
+    // ✨ NEW: ALL 8 SPECIFIC CATEGORIES AS BOOLEANS
+    required bool isPregnant,
+    required bool isLactating,
+    required bool isChildHeaded,
+    required bool isSingleHeaded,
+    required bool isSoloParent,
+    required bool isPwd,
+    required bool isIp,
+    required bool is4Ps,
   }) async {
     try {
       // 🆕 Step 1: If household ID is provided, ensure family record exists
@@ -92,33 +96,33 @@ class SupabaseService {
         await _ensureFamilyExists(household, barangay);
       }
 
-      // Step 2: Insert evacuee record with household link
+      // Step 2: Insert evacuee record
       await _supabase.from('evacuee_details').insert({
         'profile_id': profileId,
         'full_name': fullName,
         'evacuation_center_id': evacuationCenterId,
         'evacuation_center_name': evacuationCenterName,
         'age': int.tryParse(age ?? '0'),
-        'sex': sex, // Changed from 'sex' to 'gender' to match your table
+        'sex': sex, 
         'barangay': barangay,
-        'household': household, // 🆕 NEW: Link to family
-        'proof_image': proofImage, // ✅ Saved to database
+        'household': household, 
+        'proof_image': proofImage, 
         
-        // 🆕 SAVE VULNERABLE SECTOR DATA
-        'vul_sector': vulSector,
-        'disability': disability,
-        'ethnicity': ethnicity,
-        'is_4p': is4P,
+        // ✨ MAP TO 8 SPECIFIC COLUMNS
+        'is_pregnant': isPregnant,
+        'is_lactating': isLactating,
+        'is_child_headed': isChildHeaded,
+        'is_single_headed': isSingleHeaded,
+        'is_solo_parent': isSoloParent,
+        'is_pwd': isPwd,
+        'is_ip': isIp,
+        'is_4ps': is4Ps,
         
         'is_checked_in': true,
         'check_in_time': DateTime.now().toUtc().toIso8601String(),
       });
       
-      print('✅ Check-in successful: $fullName (Family: ${household ?? "N/A"})');
-      if (disability != null) print('   - PWD: $disability');
-      if (vulSector != null) print('   - Vulnerable: $vulSector');
-      if (is4P == true) print('   - 4Ps: Yes');
-      // Note: Stats are automatically updated by your SQL Trigger
+      print('✅ Check-in successful: $fullName');
     } catch (e) {
       print("⚠️ Supabase Check-In Error: $e");
       throw e; 
@@ -155,7 +159,6 @@ class SupabaseService {
       }
     } catch (e) {
       print('⚠️ Family record error (non-critical): $e');
-      // Don't throw - allow check-in to continue even if family creation fails
     }
   }
 
@@ -169,7 +172,6 @@ class SupabaseService {
             'check_out_time': DateTime.now().toUtc().toIso8601String(),
             'updated_at': DateTime.now().toUtc().toIso8601String(),
           }).eq('profile_id', profileId).eq('is_checked_in', true);
-       // Note: Stats are automatically updated by your SQL Trigger
     } catch (e) {
       print("⚠️ Supabase Check-Out Error: $e");
       throw e;

@@ -9,6 +9,10 @@ class ProfileService {
   static const String baseUrl = 'https://citrusapi-dev.onrender.com/api/v1';
   final AuthService _authService = AuthService();
 
+  // 🆕 4P's HOUSEHOLD TRACKING (STATIC!)
+  static Set<String> _fourPsHouseholds = {};
+  static bool _fourPsLoaded = false;
+
   // ----------------------------------------------------------------
   // 1. HELPER: Extract ID
   // ----------------------------------------------------------------
@@ -46,25 +50,41 @@ class ProfileService {
 
     http.Response response;
 
-    // Perform Request
-    if (method == 'POST') {
-      response = await http.post(uri, headers: headers, body: body);
-    } else {
-      response = await http.get(uri, headers: headers);
-    }
-
-    // 🔄 AUTO-RETRY IF 401 (Session Expired)
-    if (response.statusCode == 401) {
-      print('⚠️ Token expired (401). Retrying request...');
-      // Ideally, AuthService should refresh the token here. 
-      // We call getAccessToken again in case it refreshes internally.
-      token = await _authService.getAccessToken(); 
-      headers['Authorization'] = 'Bearer $token';
-      
+    // Perform Initial Request
+    try {
       if (method == 'POST') {
         response = await http.post(uri, headers: headers, body: body);
       } else {
         response = await http.get(uri, headers: headers);
+      }
+    } catch (e) {
+      // Return a fake 500 response on network error so the app doesn't crash
+      return http.Response('Network Error', 500);
+    }
+
+    // 🔄 AUTO-REFRESH LOGIC (FIXED)
+    if (response.statusCode == 401) {
+      print('⚠️ Token expired (401). Attempting to refresh...');
+
+      try {
+        // ✨ THE FIX: Explicitly call refresh before getting the token again
+        await _authService.refreshToken(); 
+        
+        // Now get the NEW token
+        token = await _authService.getAccessToken();
+        headers['Authorization'] = 'Bearer $token';
+        
+        print('✅ Token refreshed. Retrying request...');
+
+        if (method == 'POST') {
+          response = await http.post(uri, headers: headers, body: body);
+        } else {
+          response = await http.get(uri, headers: headers);
+        }
+      } catch (e) {
+        print('❌ Token Refresh Failed: $e');
+        // If refresh fails, we return the original 401 response
+        // This will trigger the "Session expired" message downstream
       }
     }
 
@@ -120,7 +140,6 @@ class ProfileService {
         return {'success': true, 'isCheckedIn': isCheckedIn, 'data': data};
       }
       
-      // Handle Token/Server Errors
       if (response.statusCode == 401) return {'success': false, 'message': 'Session expired'};
       
       return {'success': false, 'message': 'Status check failed (${response.statusCode})'};
@@ -189,7 +208,6 @@ class ProfileService {
   // ----------------------------------------------------------------
   Future<Map<String, dynamic>> getEvacuationCenters() async {
     try {
-      // Note: We use the helper here too, in case pagination fails due to token
       final response = await _authenticatedRequest('GET', '/evacuation?page=1&numPerPage=50');
 
       if (response.statusCode == 200) {
@@ -207,4 +225,49 @@ class ProfileService {
       return {'success': true, 'data': <EvacuationCenter>[]};
     }
   }
+
+  // ----------------------------------------------------------------
+  // 8. LOAD 4P's HOUSEHOLDS
+  // ----------------------------------------------------------------
+  Future<void> load4PsHouseholds() async {
+    if (_fourPsLoaded) {
+      print('✅ 4Ps households already loaded (${_fourPsHouseholds.length} total)');
+      return;
+    }
+
+    try {
+      print('🔄 Loading 4Ps households from API...');
+      
+      final response = await _authenticatedRequest('GET', '/profile?is4P=true');
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final List profiles = data['result'] ?? [];
+        
+        _fourPsHouseholds.clear();
+        
+        for (var profile in profiles) {
+          final household = profile['household'];
+          if (household != null && household.toString().isNotEmpty) {
+            _fourPsHouseholds.add(household.toString());
+          }
+        }
+        
+        _fourPsLoaded = true;
+        print('✅ Loaded ${_fourPsHouseholds.length} 4Ps households');
+      } else {
+        print('⚠️ Failed to load 4Ps households: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('❌ Error loading 4Ps households: $e');
+    }
+  }
+
+  bool isHousehold4Ps(String? householdId) {
+    if (householdId == null || householdId.isEmpty) return false;
+    return _fourPsHouseholds.contains(householdId);
+  }
+
+  int get fourPsHouseholdCount => _fourPsHouseholds.length;
+  bool get fourPsDataLoaded => _fourPsLoaded;
 }

@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:supabase_flutter/supabase_flutter.dart'; // Add this
 import '/services/profile_service.dart';
 import '/services/supabase_service.dart';
 import '/models/profile_model.dart';
@@ -39,6 +40,7 @@ class _CheckOutScreenState extends State<CheckOutScreen> {
   void _handleScan(String rawData) async {
     if (_isProcessing) return;
 
+    // Cooldown to prevent double scanning
     if (_scanCooldowns.containsKey(rawData)) {
       if (DateTime.now().difference(_scanCooldowns[rawData]!).inSeconds < 5) return;
     }
@@ -51,43 +53,48 @@ class _CheckOutScreenState extends State<CheckOutScreen> {
       final id = _profileService.extractProfileId(rawData);
       if (id == null) throw "Invalid QR Code";
 
-      final profileRes = await _profileService.getProfileDetails(id);
-      if (!profileRes['success']) throw "Profile not found";
-      final Profile profile = profileRes['data'];
+      // 1. ✨ CHECK SUPABASE DIRECTLY
+      // We check if this person exists in our 'evacuee_details' table AND is checked in
+      final List<dynamic> checkInRecord = await Supabase.instance.client
+          .from('evacuee_details')
+          .select()
+          .eq('profile_id', id)
+          .eq('is_checked_in', true)
+          .limit(1);
 
-      if (mounted) _showCheckOutDialog(profile, id);
+      if (checkInRecord.isEmpty) {
+        throw "This person is NOT checked in (Database Record Not Found).";
+      }
+
+      // 2. Get Name for the Dialog (from the record we just found)
+      final String fullName = checkInRecord[0]['full_name'] ?? "Unknown";
+
+      if (mounted) _showCheckOutDialog(fullName, id);
 
     } catch (e) {
       if(mounted) _showErrorDialog("Scan Error", e.toString().replaceAll("Exception: ", ""));
-    } finally {
-      if (mounted && _isProcessing && !Navigator.canPop(context)) { 
-        // Logic to keep processing true until dialog closes
-      }
     }
   }
 
-  Future<void> _simpleCheckOut(Profile profile, String id) async {
+  Future<void> _processCheckOut(String fullName, String id) async {
     setState(() => _isProcessing = true);
     
-    final res = await _profileService.checkOutEvacuee(id);
-
-    if (res['success']) {
-      try { 
-        await _supabaseService.trackEvacueeCheckOut(profileId: id);
-        if(mounted) _showSuccessDialog(profile.fullName);
-      } catch (e) {
-        print("SUPABASE ERROR: $e");
-        if(mounted) _showErrorDialog("Sync Warning", "Checked out locally, but Dashboard Sync failed:\n\n$e");
-      }
-    } else {
-      if(mounted) _showErrorDialog("Check-Out Failed", res['message']);
+    try { 
+      // ✨ ONLY USE SUPABASE SERVICE (Ignore old API)
+      await _supabaseService.trackEvacueeCheckOut(profileId: id);
+      
+      if(mounted) _showSuccessDialog(fullName);
+      
+    } catch (e) {
+      print("SUPABASE ERROR: $e");
+      if(mounted) _showErrorDialog("Check-Out Failed", "Database error:\n\n$e");
     }
   }
 
   // ----------------------------------------------------------------
-  // 🛡️ COMPACT DIALOGS (Fixed Height)
+  // 🛡️ UI DIALOGS
   // ----------------------------------------------------------------
-  void _showCheckOutDialog(Profile profile, String id) {
+  void _showCheckOutDialog(String name, String id) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -96,16 +103,16 @@ class _CheckOutScreenState extends State<CheckOutScreen> {
         icon: Icons.logout_rounded,
         iconColor: Colors.amber,
         content: Column(
-          mainAxisSize: MainAxisSize.min, // <--- THIS FIXES THE HEIGHT
+          mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              profile.fullName,
+              name,
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             const Text(
-              "This will end their current stay.\n(Ignores previous stuck records)",
+              "Are you sure you want to check out this evacuee?",
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
@@ -123,7 +130,7 @@ class _CheckOutScreenState extends State<CheckOutScreen> {
             ),
             onPressed: () {
               Navigator.pop(context);
-              _simpleCheckOut(profile, id);
+              _processCheckOut(name, id);
             },
             child: const Text("Confirm", style: TextStyle(color: Colors.white)),
           ),
@@ -187,7 +194,7 @@ class _CheckOutScreenState extends State<CheckOutScreen> {
     return AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       title: Column(
-        mainAxisSize: MainAxisSize.min, // <--- Key fix for compactness
+        mainAxisSize: MainAxisSize.min,
         children: [
           Container(
             padding: const EdgeInsets.all(16),

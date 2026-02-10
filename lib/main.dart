@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'screens/login_screen.dart';
 import 'screens/main_screen.dart'; // <--- IMPORTANT: Import the new Main Wrapper
 import 'services/auth_service.dart';
+import 'services/profile_service.dart'; // 🆕 ADD THIS LINE
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,8 +25,16 @@ void main() async {
       anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZtY2FrZHBlb2NpcW92c2V1a2ljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc1NTYwMDEsImV4cCI6MjA4MzEzMjAwMX0.Scod-XKDE5V4oSmIebPY6kKJjOLjm9Nco7hxv-Os-hk',  // <--- REPLACE WITH YOUR KEY
     );
     print('✅ Supabase initialized successfully');
+
+    // ---------------------------------------------------------
+    // 2. LOAD 4P's HOUSEHOLDS (NEW)
+    // ---------------------------------------------------------
+    final profileService = ProfileService();
+    await profileService.load4PsHouseholds();
+    print('✅ 4Ps households loaded: ${profileService.fourPsHouseholdCount}');
+    
   } catch (e) {
-    print('⚠️ Supabase initialization failed: $e');
+    print('⚠️ Initialization failed: $e');
   }
 
   runApp(const MyApp());

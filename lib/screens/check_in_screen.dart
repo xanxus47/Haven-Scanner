@@ -24,18 +24,34 @@ class CheckInScreen extends StatefulWidget {
 }
 
 class _CheckInScreenState extends State<CheckInScreen> {
+  // Controller & State
   MobileScannerController? _controller;
-  bool _isProcessing = false;
-  bool _isTorchOn = false; // ✨ NEW: Track flash state
-  final ImagePicker _picker = ImagePicker();
+  bool _isProcessing = false; 
+  bool _isLoadingCenters = true; 
+  bool _isTorchOn = false;
   
+  final ImagePicker _picker = ImagePicker();
   final ProfileService _profileService = ProfileService();
   final SupabaseService _supabaseService = SupabaseService();
   
+  // Data
   List<EvacuationCenter> _centers = [];
   EvacuationCenter? _selectedCenter;
   final Map<String, DateTime> _scanCooldowns = {};
 
+  // ✨ THE 8 SPECIFIC CATEGORIES
+  final List<String> _vulnerabilityOptions = [
+    'Pregnant',
+    'Lactating Mother',
+    'Child-Headed Family',
+    'Single-Headed Family',
+    'Solo Parent',
+    'Person With Disability',
+    'Indigenous People',
+    "4P's Beneficiaries"
+  ];
+
+  // Colors
   final Color _primaryColor = const Color(0xFF2563EB);
   final Color _overlayColor = const Color(0x99000000);
 
@@ -50,23 +66,35 @@ class _CheckInScreenState extends State<CheckInScreen> {
     _loadCenters();
   }
 
-  void _loadCenters() async {
-    final res = await _profileService.getEvacuationCenters();
-    if (res['success'] && mounted) {
-      setState(() => _centers = res['data']);
+  Future<void> _loadCenters() async {
+    if (!mounted) return;
+    setState(() => _isLoadingCenters = true);
+
+    try {
+      final res = await _profileService.getEvacuationCenters();
+      if (mounted) {
+        setState(() {
+          if (res['success']) {
+            _centers = res['data'];
+          }
+          _isLoadingCenters = false; 
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoadingCenters = false);
+        _showErrorDialog("Connection Error", "Could not connect to server.\n$e");
+      }
     }
   }
 
-  // ✨ NEW: Toggle flash with state tracking
   void _toggleFlash() {
     _controller?.toggleTorch();
-    setState(() {
-      _isTorchOn = !_isTorchOn;
-    });
+    setState(() => _isTorchOn = !_isTorchOn);
   }
 
   // ----------------------------------------------------------------
-  // 🔄 LOGIC FLOW
+  // 🔄 SCAN LOGIC
   // ----------------------------------------------------------------
 
   void _handleScan(String rawData) async {
@@ -84,18 +112,86 @@ class _CheckInScreenState extends State<CheckInScreen> {
       final id = _profileService.extractProfileId(rawData);
       if (id == null) throw "Invalid QR Code format";
 
+      // Fetch basic profile info (Name, Age, Address) only
       final profileRes = await _profileService.getProfileDetails(id);
       if (!profileRes['success']) throw "Profile not found";
       final Profile profile = profileRes['data'];
 
-      if (mounted) _takeProofPhotoAndCheckIn(profile, id);
+      // Go to Checklist Dialog
+      if (mounted) _showVulnerabilityDialog(profile, id);
 
     } catch (e) {
       if (mounted) _showErrorDialog("Scan Error", e.toString());
     }
   }
 
-  Future<void> _takeProofPhotoAndCheckIn(Profile profile, String id) async {
+  // ✨ STEP 2: CHECKLIST DIALOG
+  void _showVulnerabilityDialog(Profile profile, String id) {
+    List<String> selectedOptions = [];
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text("Vulnerability Assessment"),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    Text("Select all that apply for:", style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                    Text(profile.fullName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 12),
+                    ..._vulnerabilityOptions.map((option) {
+                      final isChecked = selectedOptions.contains(option);
+                      return CheckboxListTile(
+                        title: Text(option),
+                        value: isChecked,
+                        dense: true,
+                        activeColor: _primaryColor,
+                        onChanged: (bool? val) {
+                          setDialogState(() {
+                            if (val == true) {
+                              selectedOptions.add(option);
+                            } else {
+                              selectedOptions.remove(option);
+                            }
+                          });
+                        },
+                      );
+                    }),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context); 
+                    _resetScanner(); 
+                  },
+                  child: const Text("Cancel"),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context); 
+                    _takeProofPhotoAndCheckIn(profile, id, selectedOptions);
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: _primaryColor),
+                  child: const Text("Next: Take Photo", style: TextStyle(color: Colors.white)),
+                )
+              ],
+            );
+          }
+        );
+      },
+    );
+  }
+
+  // ✨ STEP 3: PHOTO
+  Future<void> _takeProofPhotoAndCheckIn(Profile profile, String id, List<String> vulnerabilities) async {
     try {
       final XFile? photo = await _picker.pickImage(
         source: ImageSource.camera,
@@ -121,7 +217,7 @@ class _CheckInScreenState extends State<CheckInScreen> {
           .from('checkin-proofs')
           .getPublicUrl(fileName);
 
-      await _processCheckIn(profile, id, proofUrl);
+      await _processCheckIn(profile, id, proofUrl, vulnerabilities);
 
     } catch (e) {
       print("PHOTO ERROR: $e");
@@ -129,41 +225,40 @@ class _CheckInScreenState extends State<CheckInScreen> {
     }
   }
 
-  Future<void> _processCheckIn(Profile profile, String id, String? proofUrl) async {
+  // ✨ STEP 4: PROCESS & SAVE (Map to 8 Booleans)
+  Future<void> _processCheckIn(Profile profile, String id, String? proofUrl, List<String> vulnerabilities) async {
     if (_selectedCenter == null) return;
 
     setState(() => _isProcessing = true);
     
-    final res = await _profileService.checkInEvacuee(id, _selectedCenter!.id);
-
-    if (res['success']) {
-      try {
-        await _supabaseService.trackEvacueeCheckIn(
-          profileId: id, 
-          fullName: profile.fullName, 
-          evacuationCenterId: _selectedCenter!.id,
-          evacuationCenterName: _selectedCenter!.name,
-          age: profile.age?.toString(), 
-          sex: profile.sex, 
-          barangay: profile.barangay,
-          household: profile.household,
-          proofImage: proofUrl,
-          
-          // 🆕 VULNERABLE SECTOR FIELDS
-          vulSector: profile.vulSector,
-          disability: profile.disability,
-          ethnicity: profile.ethnicity,
-          is4P: profile.is4P,
-        );
+    try {
+      await _supabaseService.trackEvacueeCheckIn(
+        profileId: id, 
+        fullName: profile.fullName, 
+        evacuationCenterId: _selectedCenter!.id,
+        evacuationCenterName: _selectedCenter!.name,
+        age: profile.age?.toString(), 
+        sex: profile.sex, 
+        barangay: profile.barangay,
+        household: profile.household,
+        proofImage: proofUrl,
         
-        if (mounted) _showSuccessDialog(profile.fullName);
-        
-      } catch (e) {
-        print("SUPABASE ERROR: $e");
-        if (mounted) _showErrorDialog("Sync Error", "Dashboard Sync failed:\n\n$e");
-      }
-    } else {
-      if (mounted) _showErrorDialog("Check-In Failed", res['message']);
+        // ✨ MAP TO SPECIFIC BOOLEANS
+        isPregnant: vulnerabilities.contains('Pregnant'),
+        isLactating: vulnerabilities.contains('Lactating Mother'),
+        isChildHeaded: vulnerabilities.contains('Child-Headed Family'),
+        isSingleHeaded: vulnerabilities.contains('Single-Headed Family'),
+        isSoloParent: vulnerabilities.contains('Solo Parent'),
+        isPwd: vulnerabilities.contains('Person With Disability'),
+        isIp: vulnerabilities.contains('Indigenous People'),
+        is4Ps: vulnerabilities.contains("4P's Beneficiaries"),
+      );
+      
+      if (mounted) _showSuccessDialog(profile.fullName);
+      
+    } catch (e) {
+      print("SUPABASE ERROR: $e");
+      if (mounted) _showErrorDialog("Sync Error", "Dashboard Sync failed:\n\n$e");
     }
   }
 
@@ -181,63 +276,93 @@ class _CheckInScreenState extends State<CheckInScreen> {
           title: const Text("Select Location"), 
           backgroundColor: _primaryColor,
           elevation: 0,
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: _loadCenters,
+              tooltip: "Refresh List",
+            )
+          ],
         ),
-        body: _centers.isEmpty 
+        body: _isLoadingCenters 
           ? const Center(child: CircularProgressIndicator()) 
-          : ListView.separated(
-              padding: const EdgeInsets.all(20),
-              itemCount: _centers.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 12),
-              itemBuilder: (context, i) {
-                final center = _centers[i];
-                return Material(
-                  color: Colors.white,
-                  elevation: 2,
-                  shadowColor: Colors.black12,
-                  borderRadius: BorderRadius.circular(16),
-                  child: InkWell(
-                    onTap: () {
-                      setState(() => _selectedCenter = center);
-                      _resetScanner();
-                    },
-                    borderRadius: BorderRadius.circular(16),
-                    child: Container(
-                      padding: const EdgeInsets.all(20),
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: _primaryColor.withOpacity(0.1),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Icon(Icons.location_on_rounded, color: _primaryColor),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  center.name,
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  center.barangay,
-                                  style: TextStyle(color: Colors.grey[600], fontSize: 14),
-                                ),
-                              ],
-                            ),
-                          ),
-                          Icon(Icons.chevron_right, color: Colors.grey[400]),
-                        ],
+          : _centers.isEmpty 
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.location_off_outlined, size: 64, color: Colors.grey[400]),
+                      const SizedBox(height: 16),
+                      Text(
+                        "No Active Centers Found",
+                        style: TextStyle(fontSize: 18, color: Colors.grey[600], fontWeight: FontWeight.bold),
                       ),
-                    ),
+                      const SizedBox(height: 8),
+                      Text("Ask admin to open a center\nor try refreshing.", textAlign: TextAlign.center, style: TextStyle(color: Colors.grey[500])),
+                      const SizedBox(height: 24),
+                      ElevatedButton.icon(
+                        onPressed: _loadCenters,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text("Refresh"),
+                        style: ElevatedButton.styleFrom(backgroundColor: _primaryColor),
+                      )
+                    ],
                   ),
-                );
-              },
-            ),
+                ) 
+              : ListView.separated(
+                  padding: const EdgeInsets.all(20),
+                  itemCount: _centers.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 12),
+                  itemBuilder: (context, i) {
+                    final center = _centers[i];
+                    return Material(
+                      color: Colors.white,
+                      elevation: 2,
+                      shadowColor: Colors.black12,
+                      borderRadius: BorderRadius.circular(16),
+                      child: InkWell(
+                        onTap: () {
+                          setState(() => _selectedCenter = center);
+                          _resetScanner();
+                        },
+                        borderRadius: BorderRadius.circular(16),
+                        child: Container(
+                          padding: const EdgeInsets.all(20),
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: _primaryColor.withOpacity(0.1),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(Icons.location_on_rounded, color: _primaryColor),
+                              ),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      center.name,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      center.barangay,
+                                      style: TextStyle(color: Colors.grey[600], fontSize: 14),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Icon(Icons.chevron_right, color: Colors.grey[400]),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
       );
     }
 
@@ -245,7 +370,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          // Camera Feed
           MobileScanner(
             controller: _controller,
             onDetect: (capture) {
@@ -258,22 +382,16 @@ class _CheckInScreenState extends State<CheckInScreen> {
               }
             },
           ),
-
-          // Overlay + Scan Frame
           CustomPaint(
             painter: ScannerOverlayPainter(_overlayColor),
             child: const SizedBox.expand(),
           ),
-
-          // Top Header Bar
           Positioned(
             top: 0, left: 0, right: 0,
             child: Container(
               padding: EdgeInsets.only(
                 top: MediaQuery.of(context).padding.top + 10, 
-                bottom: 16, 
-                left: 20, 
-                right: 20
+                bottom: 16, left: 20, right: 20
               ),
               decoration: BoxDecoration(
                 gradient: LinearGradient(
@@ -293,52 +411,33 @@ class _CheckInScreenState extends State<CheckInScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          "Checking in to:", 
-                          style: TextStyle(color: Colors.white70, fontSize: 12)
-                        ),
+                        const Text("Checking in to:", style: TextStyle(color: Colors.white70, fontSize: 12)),
                         Text(
                           _selectedCenter!.name, 
-                          style: const TextStyle(
-                            color: Colors.white, 
-                            fontWeight: FontWeight.bold, 
-                            fontSize: 18
-                          ),
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ],
                     ),
                   ),
-                  
-                  // ✨ ENHANCED FLASH BUTTON
                   Container(
                     margin: const EdgeInsets.only(right: 8),
                     decoration: BoxDecoration(
-                      color: _isTorchOn 
-                          ? Colors.amber.withOpacity(0.3) 
-                          : Colors.white.withOpacity(0.1),
+                      color: _isTorchOn ? Colors.amber.withOpacity(0.3) : Colors.white.withOpacity(0.1),
                       shape: BoxShape.circle,
-                      border: Border.all(
-                        color: _isTorchOn ? Colors.amber : Colors.white24,
-                        width: 2,
-                      ),
+                      border: Border.all(color: _isTorchOn ? Colors.amber : Colors.white24, width: 2),
                     ),
                     child: IconButton(
-                      icon: Icon(
-                        _isTorchOn ? Icons.flash_on : Icons.flash_off,
-                        color: _isTorchOn ? Colors.amber : Colors.white,
-                      ),
+                      icon: Icon(_isTorchOn ? Icons.flash_on : Icons.flash_off, color: _isTorchOn ? Colors.amber : Colors.white),
                       onPressed: _toggleFlash,
-                      tooltip: _isTorchOn ? 'Turn off flash' : 'Turn on flash',
                     ),
                   ),
-                  
                   TextButton.icon(
                     onPressed: () {
                       setState(() {
                         _selectedCenter = null;
                         _isProcessing = false;
-                        _isTorchOn = false; // Reset flash state
+                        _isTorchOn = false;
                       });
                     },
                     icon: const Icon(Icons.edit, color: Colors.white, size: 16),
@@ -352,8 +451,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
               ),
             ),
           ),
-
-          // Processing Loader
           if (_isProcessing) 
             Container(
               color: Colors.black54, 
@@ -402,21 +499,14 @@ class _CheckInScreenState extends State<CheckInScreen> {
                 child: const Icon(Icons.check_rounded, size: 48, color: Colors.green),
               ),
               const SizedBox(height: 20),
-              
-              const Text(
-                "Check-In Successful",
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              ),
+              const Text("Check-In Successful", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
-              
               Text(
                 "$name has been verified and checked in to ${_selectedCenter?.name}.",
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.grey[600], fontSize: 15, height: 1.4),
               ),
-              
               const SizedBox(height: 28),
-              
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -431,10 +521,7 @@ class _CheckInScreenState extends State<CheckInScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                  child: const Text(
-                    "Scan Next Evacuee", 
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)
-                  ),
+                  child: const Text("Scan Next Evacuee", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                 ),
               )
             ],
@@ -469,27 +556,15 @@ class _CheckInScreenState extends State<CheckInScreen> {
                 child: const Icon(Icons.warning_amber_rounded, size: 32, color: Colors.redAccent),
               ),
               const SizedBox(height: 16),
-              
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
+              Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
-              
               ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 200),
                 child: SingleChildScrollView(
-                  child: Text(
-                    msg,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.grey[600], fontSize: 14),
-                  ),
+                  child: Text(msg, textAlign: TextAlign.center, style: TextStyle(color: Colors.grey[600], fontSize: 14)),
                 ),
               ),
-              
               const SizedBox(height: 24),
-              
               SizedBox(
                 width: double.infinity,
                 child: TextButton(
@@ -528,7 +603,7 @@ class _CheckInScreenState extends State<CheckInScreen> {
 }
 
 // ----------------------------------------------------------------
-// 🎨 SCANNER OVERLAY PAINTER (Preserved from original)
+// 🎨 SCANNER OVERLAY PAINTER
 // ----------------------------------------------------------------
 
 class ScannerOverlayPainter extends CustomPainter {
@@ -559,53 +634,15 @@ class ScannerOverlayPainter extends CustomPainter {
 
     final double cornerLength = 30;
     
-    // Top-left
-    canvas.drawLine(
-      Offset(scanArea.left, scanArea.top + cornerLength),
-      Offset(scanArea.left, scanArea.top),
-      borderPaint,
-    );
-    canvas.drawLine(
-      Offset(scanArea.left, scanArea.top),
-      Offset(scanArea.left + cornerLength, scanArea.top),
-      borderPaint,
-    );
-
-    // Top-right
-    canvas.drawLine(
-      Offset(scanArea.right - cornerLength, scanArea.top),
-      Offset(scanArea.right, scanArea.top),
-      borderPaint,
-    );
-    canvas.drawLine(
-      Offset(scanArea.right, scanArea.top),
-      Offset(scanArea.right, scanArea.top + cornerLength),
-      borderPaint,
-    );
-
-    // Bottom-left
-    canvas.drawLine(
-      Offset(scanArea.left, scanArea.bottom - cornerLength),
-      Offset(scanArea.left, scanArea.bottom),
-      borderPaint,
-    );
-    canvas.drawLine(
-      Offset(scanArea.left, scanArea.bottom),
-      Offset(scanArea.left + cornerLength, scanArea.bottom),
-      borderPaint,
-    );
-
-    // Bottom-right
-    canvas.drawLine(
-      Offset(scanArea.right - cornerLength, scanArea.bottom),
-      Offset(scanArea.right, scanArea.bottom),
-      borderPaint,
-    );
-    canvas.drawLine(
-      Offset(scanArea.right, scanArea.bottom - cornerLength),
-      Offset(scanArea.right, scanArea.bottom),
-      borderPaint,
-    );
+    // Draw corners
+    canvas.drawLine(Offset(scanArea.left, scanArea.top + cornerLength), Offset(scanArea.left, scanArea.top), borderPaint);
+    canvas.drawLine(Offset(scanArea.left, scanArea.top), Offset(scanArea.left + cornerLength, scanArea.top), borderPaint);
+    canvas.drawLine(Offset(scanArea.right - cornerLength, scanArea.top), Offset(scanArea.right, scanArea.top), borderPaint);
+    canvas.drawLine(Offset(scanArea.right, scanArea.top), Offset(scanArea.right, scanArea.top + cornerLength), borderPaint);
+    canvas.drawLine(Offset(scanArea.left, scanArea.bottom - cornerLength), Offset(scanArea.left, scanArea.bottom), borderPaint);
+    canvas.drawLine(Offset(scanArea.left, scanArea.bottom), Offset(scanArea.left + cornerLength, scanArea.bottom), borderPaint);
+    canvas.drawLine(Offset(scanArea.right - cornerLength, scanArea.bottom), Offset(scanArea.right, scanArea.bottom), borderPaint);
+    canvas.drawLine(Offset(scanArea.right, scanArea.bottom - cornerLength), Offset(scanArea.right, scanArea.bottom), borderPaint);
   }
 
   @override
