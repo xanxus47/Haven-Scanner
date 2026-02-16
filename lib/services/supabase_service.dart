@@ -4,11 +4,10 @@ class SupabaseService {
   final SupabaseClient _supabase = Supabase.instance.client;
 
   // ----------------------------------------------------------------
-  // 1. FETCH HISTORY (Includes Proof Image)
+  // 1. FETCH HISTORY
   // ----------------------------------------------------------------
   Future<List<Map<String, dynamic>>> fetchEvacuees({bool? isCheckedIn}) async {
     try {
-      // ✅ Explicitly fetching 'proof_image' along with other data
       var query = _supabase.from('evacuee_details').select('*, proof_image');
       
       if (isCheckedIn != null) {
@@ -32,7 +31,6 @@ class SupabaseService {
 
       await _supabase.from('evacuee_details').delete().eq('id', id);
 
-      // Manually decrement stats (since we only have triggers for Insert/Update)
       await _decrementStatsAfterDelete(
         centerId: record['evacuation_center_id'],
         wasActive: record['is_checked_in'] == true,
@@ -67,8 +65,10 @@ class SupabaseService {
   }
 
   // ----------------------------------------------------------------
-  // 3. TRACK CHECK-IN (Saves Photo + 8 Specific Categories)
+  // 3. TRACK CHECK-IN (Updated with isOutsideEc)
   // ----------------------------------------------------------------
+  // [Inside SupabaseService class]
+
   Future<void> trackEvacueeCheckIn({
     required String profileId,
     required String fullName,
@@ -80,7 +80,7 @@ class SupabaseService {
     String? proofImage, 
     String? household,  
     
-    // ✨ NEW: ALL 8 SPECIFIC CATEGORIES AS BOOLEANS
+    // Vulnerabilities
     required bool isPregnant,
     required bool isLactating,
     required bool isChildHeaded,
@@ -89,14 +89,16 @@ class SupabaseService {
     required bool isPwd,
     required bool isIp,
     required bool is4Ps,
+    required bool isLgbt, // 🏳️‍🌈 NEW PARAMETER
+
+    // Location Status
+    required bool isOutsideEc, 
   }) async {
     try {
-      // 🆕 Step 1: If household ID is provided, ensure family record exists
       if (household != null && household.isNotEmpty) {
         await _ensureFamilyExists(household, barangay);
       }
 
-      // Step 2: Insert evacuee record
       await _supabase.from('evacuee_details').insert({
         'profile_id': profileId,
         'full_name': fullName,
@@ -108,7 +110,7 @@ class SupabaseService {
         'household': household, 
         'proof_image': proofImage, 
         
-        // ✨ MAP TO 8 SPECIFIC COLUMNS
+        // Vulnerabilities
         'is_pregnant': isPregnant,
         'is_lactating': isLactating,
         'is_child_headed': isChildHeaded,
@@ -117,22 +119,24 @@ class SupabaseService {
         'is_pwd': isPwd,
         'is_ip': isIp,
         'is_4ps': is4Ps,
+        'is_lgbt': isLgbt, // 🏳️‍🌈 SAVE TO DB
+
+        // Location
+        'is_outside_ec': isOutsideEc,
         
         'is_checked_in': true,
         'check_in_time': DateTime.now().toUtc().toIso8601String(),
       });
       
-      print('✅ Check-in successful: $fullName');
+      print('✅ Check-in successful: $fullName (LGBT: $isLgbt)');
     } catch (e) {
       print("⚠️ Supabase Check-In Error: $e");
       throw e; 
     }
   }
 
-  // 🆕 NEW: Ensure family record exists in database
   Future<void> _ensureFamilyExists(String householdId, String? barangay) async {
     try {
-      // Check if family already exists
       final existingFamily = await _supabase
           .from('family')
           .select()
@@ -140,22 +144,18 @@ class SupabaseService {
           .maybeSingle();
 
       if (existingFamily == null) {
-        // Create new family record
         await _supabase.from('family').insert({
           'household': householdId,
           'barangay': barangay,
           'isActive': true,
-          'memberCount': 0, // Will be updated by trigger
+          'memberCount': 0, 
           'created_at': DateTime.now().toUtc().toIso8601String(),
         });
-        print('✅ Created new family: $householdId');
       } else {
-        // Update existing family timestamp
         await _supabase
             .from('family')
             .update({'updated_at': DateTime.now().toUtc().toIso8601String()})
             .eq('household', householdId);
-        print('✅ Updated existing family: $householdId');
       }
     } catch (e) {
       print('⚠️ Family record error (non-critical): $e');

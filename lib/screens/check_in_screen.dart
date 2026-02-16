@@ -30,6 +30,9 @@ class _CheckInScreenState extends State<CheckInScreen> {
   bool _isLoadingCenters = true; 
   bool _isTorchOn = false;
   
+  // ✨ NEW STATE FOR LOCATION
+  bool _isOutsideEc = false; 
+
   final ImagePicker _picker = ImagePicker();
   final ProfileService _profileService = ProfileService();
   final SupabaseService _supabaseService = SupabaseService();
@@ -39,7 +42,7 @@ class _CheckInScreenState extends State<CheckInScreen> {
   EvacuationCenter? _selectedCenter;
   final Map<String, DateTime> _scanCooldowns = {};
 
-  // ✨ THE 8 SPECIFIC CATEGORIES
+  // ✨ UPDATED LIST WITH LGBTQIA+
   final List<String> _vulnerabilityOptions = [
     'Pregnant',
     'Lactating Mother',
@@ -48,10 +51,10 @@ class _CheckInScreenState extends State<CheckInScreen> {
     'Solo Parent',
     'Person With Disability',
     'Indigenous People',
-    "4P's Beneficiaries"
+    "4P's Beneficiaries",
+    'LGBTQIA+' // 🏳️‍🌈 NEW OPTION
   ];
 
-  // Colors
   final Color _primaryColor = const Color(0xFF2563EB);
   final Color _overlayColor = const Color(0x99000000);
 
@@ -93,10 +96,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
     setState(() => _isTorchOn = !_isTorchOn);
   }
 
-  // ----------------------------------------------------------------
-  // 🔄 SCAN LOGIC
-  // ----------------------------------------------------------------
-
   void _handleScan(String rawData) async {
     if (_isProcessing || _selectedCenter == null) return;
 
@@ -112,12 +111,10 @@ class _CheckInScreenState extends State<CheckInScreen> {
       final id = _profileService.extractProfileId(rawData);
       if (id == null) throw "Invalid QR Code format";
 
-      // Fetch basic profile info (Name, Age, Address) only
       final profileRes = await _profileService.getProfileDetails(id);
       if (!profileRes['success']) throw "Profile not found";
       final Profile profile = profileRes['data'];
 
-      // Go to Checklist Dialog
       if (mounted) _showVulnerabilityDialog(profile, id);
 
     } catch (e) {
@@ -125,9 +122,10 @@ class _CheckInScreenState extends State<CheckInScreen> {
     }
   }
 
-  // ✨ STEP 2: CHECKLIST DIALOG
+  // ✨ DIALOG WITH BOTH FEATURES (Outside EC Toggle + LGBTQ Checkbox)
   void _showVulnerabilityDialog(Profile profile, String id) {
     List<String> selectedOptions = [];
+    _isOutsideEc = false; // Reset per scan
     
     showDialog(
       context: context,
@@ -136,15 +134,48 @@ class _CheckInScreenState extends State<CheckInScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              title: const Text("Vulnerability Assessment"),
+              title: const Text("Assessment"),
               content: SizedBox(
                 width: double.maxFinite,
                 child: ListView(
                   shrinkWrap: true,
                   children: [
-                    Text("Select all that apply for:", style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                    Text("Profile:", style: TextStyle(color: Colors.grey[600], fontSize: 13)),
                     Text(profile.fullName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                     const SizedBox(height: 12),
+                    
+                    // 🏠 LOCATION TOGGLE
+                    Container(
+                      decoration: BoxDecoration(
+                        color: _isOutsideEc ? Colors.orange.shade50 : Colors.green.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: _isOutsideEc ? Colors.orange : Colors.green),
+                      ),
+                      child: SwitchListTile(
+                        title: Text(
+                          _isOutsideEc ? "Outside EC (Home-based)" : "Inside Evacuation Center",
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            color: _isOutsideEc ? Colors.deepOrange : Colors.green[800],
+                          ),
+                        ),
+                        subtitle: Text(
+                          _isOutsideEc ? "Staying at relative's house" : "Physically in center",
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        value: _isOutsideEc,
+                        activeColor: Colors.deepOrange,
+                        onChanged: (val) {
+                          setDialogState(() => _isOutsideEc = val);
+                        },
+                      ),
+                    ),
+                    
+                    const Divider(height: 24),
+                    Text("Vulnerabilities:", style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                    
+                    // 🏳️‍🌈 VULNERABILITY CHECKBOXES (Includes LGBTQIA+)
                     ..._vulnerabilityOptions.map((option) {
                       final isChecked = selectedOptions.contains(option);
                       return CheckboxListTile(
@@ -190,7 +221,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
     );
   }
 
-  // ✨ STEP 3: PHOTO
   Future<void> _takeProofPhotoAndCheckIn(Profile profile, String id, List<String> vulnerabilities) async {
     try {
       final XFile? photo = await _picker.pickImage(
@@ -225,7 +255,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
     }
   }
 
-  // ✨ STEP 4: PROCESS & SAVE (Map to 8 Booleans)
   Future<void> _processCheckIn(Profile profile, String id, String? proofUrl, List<String> vulnerabilities) async {
     if (_selectedCenter == null) return;
 
@@ -243,7 +272,7 @@ class _CheckInScreenState extends State<CheckInScreen> {
         household: profile.household,
         proofImage: proofUrl,
         
-        // ✨ MAP TO SPECIFIC BOOLEANS
+        // Map Booleans
         isPregnant: vulnerabilities.contains('Pregnant'),
         isLactating: vulnerabilities.contains('Lactating Mother'),
         isChildHeaded: vulnerabilities.contains('Child-Headed Family'),
@@ -252,6 +281,10 @@ class _CheckInScreenState extends State<CheckInScreen> {
         isPwd: vulnerabilities.contains('Person With Disability'),
         isIp: vulnerabilities.contains('Indigenous People'),
         is4Ps: vulnerabilities.contains("4P's Beneficiaries"),
+        isLgbt: vulnerabilities.contains('LGBTQIA+'), // 🏳️‍🌈 PASS LGBTQ STATUS
+
+        // 🏠 PASS LOCATION STATUS
+        isOutsideEc: _isOutsideEc,
       );
       
       if (mounted) _showSuccessDialog(profile.fullName);
@@ -262,13 +295,8 @@ class _CheckInScreenState extends State<CheckInScreen> {
     }
   }
 
-  // ----------------------------------------------------------------
-  // 🎨 UI BUILDER
-  // ----------------------------------------------------------------
-
   @override
   Widget build(BuildContext context) {
-    // VIEW 1: SELECT CENTER
     if (_selectedCenter == null) {
       return Scaffold(
         backgroundColor: Colors.grey[50],
@@ -366,7 +394,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
       );
     }
 
-    // VIEW 2: SCANNER ACTIVE
     return Scaffold(
       body: Stack(
         children: [
@@ -469,10 +496,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
       ),
     );
   }
-
-  // ----------------------------------------------------------------
-  // 🎨 DIALOGS
-  // ----------------------------------------------------------------
 
   void _showSuccessDialog(String name) {
     showDialog(
@@ -602,10 +625,6 @@ class _CheckInScreenState extends State<CheckInScreen> {
   }
 }
 
-// ----------------------------------------------------------------
-// 🎨 SCANNER OVERLAY PAINTER
-// ----------------------------------------------------------------
-
 class ScannerOverlayPainter extends CustomPainter {
   final Color overlayColor;
 
@@ -634,7 +653,6 @@ class ScannerOverlayPainter extends CustomPainter {
 
     final double cornerLength = 30;
     
-    // Draw corners
     canvas.drawLine(Offset(scanArea.left, scanArea.top + cornerLength), Offset(scanArea.left, scanArea.top), borderPaint);
     canvas.drawLine(Offset(scanArea.left, scanArea.top), Offset(scanArea.left + cornerLength, scanArea.top), borderPaint);
     canvas.drawLine(Offset(scanArea.right - cornerLength, scanArea.top), Offset(scanArea.right, scanArea.top), borderPaint);
